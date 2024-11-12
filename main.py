@@ -52,7 +52,7 @@ class VIPlannerDemo:
     @torch.no_grad()
     def run(
         self,
-        goal = [0.0, 5.0, 0.0]
+        goal = [20.0, 0.0, 0.0]
     ):
         # Set dummy goal in robot frame (x,y,z)
         goal = torch.tensor([
@@ -114,7 +114,10 @@ class VIPlannerDemo:
                 ]
             )
 
-            trajectory_cam = trajectory[:,[0,2,1]]
+            # trajectory_cam = trajectory[:,[0,2,1]]
+            trajectory_cam = trajectory[:,[1,2,0]]
+            # trajectory_cam[:, 0] *= -1
+            trajectory_cam[:, 1] *= -1
             print('trajectory_cam', trajectory_cam[::4,:])
             plot_trajectories(
                 frame_img=vis_frame,
