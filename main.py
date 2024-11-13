@@ -52,12 +52,26 @@ class VIPlannerDemo:
     @torch.no_grad()
     def run(
         self,
-        goal = [20.0, 0.0, 0.0]
     ):
         # Set dummy goal in robot frame (x,y,z)
-        goal = torch.tensor([
-            goal
-        ])
+        # TODO: set confidence threshold to stop
+        # TODO: Use VLM to decide destination region
+        # TODO: integrate GPS data with VLM
+        goal_list = [
+            [20.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [5.0, 0.0, 0.0],
+
+            # Left
+            [20.0, 1.0, 0.0],
+            [10.0, 2.0, 0.0],
+            [5.0, 3.0, 0.0],
+
+            # Right
+            [20.0, -1.0, 0.0],
+            [10.0, -2.0, 0.0],
+            [5.0, -3.0, 0.0],
+        ]
 
         out = None
         output_path = "assets/vis.mp4"
@@ -84,11 +98,23 @@ class VIPlannerDemo:
             # Create depth image
             depth = perception_outputs['depth']
 
-            # Run planner
-            if self.planner.train_cfg.sem or self.planner.train_cfg.rgb:
-                trajectory, fear = self.planner.plan(depth, semantic_mask, goal)
-            else:
-                trajectory, fear = self.planner.plan_depth(depth, goal)
+            trajectory, fear = None, None
+
+            for goal_i in goal_list:
+                goal = torch.tensor([
+                    goal_i
+                ])
+                # Run planner
+                if self.planner.train_cfg.sem or self.planner.train_cfg.rgb:
+                    trajectory_i, fear_i = self.planner.plan(depth, semantic_mask, goal)
+                else:
+                    trajectory_i, fear_i = self.planner.plan_depth(depth, goal)
+                
+                if fear is None:
+                    trajectory, fear = trajectory_i, fear_i
+                elif fear_i < fear:
+                    trajectory, fear = trajectory_i, fear_i
+
                 
             # print(f"Trajectory shape: {trajectory.shape}")
             # print(f"Fear value: {fear}")
@@ -102,7 +128,7 @@ class VIPlannerDemo:
             
             offsets = (0, 1.5, 0.0)
             intrinsic_matrix = estimate_intrinsics(
-                fov_x=60, fov_y=60, height=H, width=W,
+                fov_x=80, fov_y=80, height=H, width=W,
             )
             # 4x4 matrix
             extrinsic_matrix = np.array(
@@ -116,7 +142,7 @@ class VIPlannerDemo:
 
             # trajectory_cam = trajectory[:,[0,2,1]]
             trajectory_cam = trajectory[:,[1,2,0]]
-            # trajectory_cam[:, 0] *= -1
+            trajectory_cam[:, 0] *= -1
             trajectory_cam[:, 1] *= -1
             print('trajectory_cam', trajectory_cam[::4,:])
             plot_trajectories(

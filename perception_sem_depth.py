@@ -211,11 +211,32 @@ class SemDepthPerception:
             )[0]
         )
 
-        depth_np = depth_prediction.cpu().numpy()
+        disparity_np = depth_prediction.cpu().numpy()
+        print('disparity_np', disparity_np.min(), disparity_np.max())
+
+        max_disparity = 30.0
+        min_disparity = 0.001
+        disparity_np[disparity_np > max_disparity] = -1
+        disparity_np[disparity_np <= min_disparity] = -1
+        print('disparity_np', disparity_np.min(), disparity_np.max())
+        # disparity_np[~np.isfinite(disparity_np)] = 0.0
+
+        depth_np = 1.0 / disparity_np
+        depth_np *= 25.0
+        print('depth_np', depth_np.min(), depth_np.max())
+
         # Thresholding
         max_depth = 10.0  # Same as original implementation
-        depth_np[depth_np > max_depth] = 0.0
-        depth_np[~np.isfinite(depth_np)] = 0.0
+        min_depth = 1/max_disparity
+        depth_np[depth_np > max_depth] = max_depth
+        depth_np[depth_np < min_depth] = max_depth
+        depth_np[~np.isfinite(depth_np)] = max_depth
+
+        print('depth_np', depth_np.min(), depth_np.max())
+
+        disparity_np = 1.0 / depth_np
+        print('disparity_np', disparity_np.min(), disparity_np.max())
+
 
         pred_semantic_map_np = pred_semantic_map.cpu().numpy()
 
@@ -223,7 +244,7 @@ class SemDepthPerception:
             pred_semantic_map_np
         )
 
-        depth_np_rgb = depth_to_rgb(depth_np)
+        depth_np_rgb = depth_to_rgb(disparity_np)
 
         frame_data = {
             "rgb": img,
