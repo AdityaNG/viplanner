@@ -10,6 +10,9 @@ from typing import List, Optional, Tuple, cast
 import cv2
 import numpy as np
 
+import hashlib
+import pickle
+from typing import Dict, List, Optional, Tuple, cast
 from typing import Optional, Tuple, Union
 
 def estimate_intrinsics(
@@ -530,6 +533,103 @@ def get_camera_trajectory_cropped(
     return trajectory_cropped
 
 
+def create_concentric_circles(radii, separation_distance):
+    circles = []
+
+    for radius in radii:
+        # Calculate the number of points needed for this circle
+        circumference = 2 * np.pi * radius
+        num_points = int(np.ceil(circumference / separation_distance))
+
+        # Generate evenly spaced angles
+        angles = np.linspace(0, 2 * np.pi, num_points, endpoint=False)
+
+        # Create x and z coordinates
+        x = radius * np.cos(angles)
+        z = radius * np.sin(angles)
+
+        # Create y coordinates
+        # (all zeros since the circles are in the x-z plane)
+        y = np.zeros_like(x)
+
+        # Combine into a single array of shape (N, 3)
+        circle_points = np.column_stack((x, y, z))
+
+        circles.append(circle_points)
+
+    return circles
+
+
+# Global in-memory cache
+__conc_circles_memory_cache: Dict[str, np.ndarray] = {}
+
+
+def get_cached_frame_img_circles(
+    frame_img: np.ndarray,
+    intrinsic_matrix: np.ndarray,
+    grid_range_img: Tuple[int, int],
+    average_height: float,
+    method: str,
+):
+    global __conc_circles_memory_cache
+
+    # Round intrinsic matrix to 3 decimals
+    rounded_intrinsic_matrix = np.round(intrinsic_matrix, decimals=3)
+
+    # Ensure grid_range_img is a tuple of ints
+    grid_range_img_tuple = tuple(map(int, grid_range_img))
+
+    # Round average height to 3 decimals
+    rounded_average_height = round(average_height, 3)
+
+    hash_args = (
+        rounded_intrinsic_matrix.tobytes(),
+        grid_range_img_tuple,
+        rounded_average_height,
+        method,
+    )
+    hash_val = hashlib.md5(str(hash_args).encode()).hexdigest()
+
+    if hash_val in __conc_circles_memory_cache:
+        return __conc_circles_memory_cache[hash_val]
+
+    cache_dir = os.path.join(os.path.expanduser("~/.cache"), "plot_traj")
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_file = f"{cache_dir}/{hash_val}.pkl"
+
+    if os.path.exists(cache_file):
+        with open(cache_file, "rb") as f:
+            frame_img_circles = pickle.load(f)
+
+    else:
+        intrinsic_matrix = np.array(intrinsic_matrix)
+        frame_img_circles = np.zeros_like(frame_img)
+        circles = create_concentric_circles(
+            range(grid_range_img[0], grid_range_img[1]),
+            1.0,
+        )
+        for circle in circles:
+            circle[:, 1] = average_height
+            plot_steering_trajectory(
+                frame_img=frame_img_circles,
+                trajectory=circle,
+                intrinsic_matrix=intrinsic_matrix,
+                extrinsic_matrix=np.eye(4),
+                color=(255, 255, 255),
+                method=method,
+                track=False,
+                line=True,
+                draw_grid=False,
+                interpolation_samples=0,
+                thickness=1,
+            )
+        with open(cache_file, "wb") as f:
+            pickle.dump(frame_img_circles, f)
+
+    __conc_circles_memory_cache[hash_val] = frame_img_circles
+    return frame_img_circles
+
+
 def plot_steering_trajectory(
     frame_img: np.ndarray,
     trajectory: np.ndarray,
@@ -539,7 +639,8 @@ def plot_steering_trajectory(
     method: str = "add_weighted",
     track: bool = False,
     line: bool = False,
-    grid_range_img: Tuple[int, int] = (6, 18),
+    draw_grid: bool = False,
+    grid_range_img: Tuple[int, int] = (1, 5),
     track_width: float = 1.5,
     interpolation_samples: int = 0,
     thickness: int = 2,
@@ -682,6 +783,23 @@ def plot_steering_trajectory(
     elif method == "add_weighted":
         cv2.addWeighted(frame_img, 1.0, rect_frame, 0.5, 0.0, frame_img)
 
+    if draw_grid:
+        average_height = np.mean(trajectory_3D_cam[:, 1])
+        frame_img_circles = get_cached_frame_img_circles(
+            frame_img,
+            intrinsic_matrix,
+            grid_range_img,
+            average_height,
+            method,
+        )
+
+        mask = np.logical_and(
+            frame_img_circles[:, :, 0] == 255,
+            frame_img_circles[:, :, 1] == 255,
+            frame_img_circles[:, :, 2] == 255,
+        )
+        frame_img[mask] = color
+
     return frame_img
 
 
@@ -692,8 +810,19 @@ def plot_bev_trajectory(
     thickness: int = 2,
     grid_range: float = 20,  # meters
     line: bool = False,
+    draw_grid_bev: bool = False,
     traj_plot: Optional[np.ndarray] = None,  # image to write to
 ) -> np.ndarray:
+    """
+    Plots out a trajectory in BEV space
+    3D Trajectory:
+        x: horizontal plane
+        y: vertical into the ground
+        z: depth into the camera
+    2D Trajectory:
+        x: horizontal plane
+        y: depth into the camera
+    """
     WIDTH, HEIGHT = image_size
 
     if traj_plot is None:
@@ -703,8 +832,20 @@ def plot_bev_trajectory(
             traj_plot.shape[:2] == image_size[::-1]
         ), f"Incorrect shape: {traj_plot.shape}, expected {image_size[::-1]}"
 
-    Z = trajectory[:, 1]
-    X = trajectory[:, 0]
+    if trajectory.shape[1] == 2:
+        # 2D input
+
+        Z = trajectory[:, 1]
+        X = trajectory[:, 0]
+    elif trajectory.shape[1] == 3:
+        # 3D input
+
+        Z = trajectory[:, 2]
+        X = trajectory[:, 0]
+    else:
+        raise Exception(
+            f"Trajectory must be 2D or 3D, got: {trajectory.shape}"
+        )
 
     X_min, X_max = -grid_range, grid_range
     Z_min, Z_max = -0.1 * grid_range, grid_range
@@ -726,8 +867,39 @@ def plot_bev_trajectory(
 
         cv2.circle(traj_plot, (u, v), thickness, color, -1)
 
-        if line:
+        if line and traj_index > 0:
             cv2.line(traj_plot, (u_p, v_p), (u, v), color, thickness)
+
+    if draw_grid_bev:
+        # Horizontal lines
+        for i in range(round(X_min), round(X_max), 1):
+            p = (i - X_min) / (X_max - X_min)
+            u = int(round(np.clip((p * (WIDTH - 1)), -1, WIDTH + 1)))
+            v = 0
+            u_p = u
+            v_p = HEIGHT
+
+            cv2.line(
+                traj_plot, (u_p, v_p), (u, v), color, max(1, thickness // 4)
+            )
+
+        # Vertical lines
+        for i in range(round(Z_min), round(Z_max), 1):
+            p = (i - Z_min) / (Z_max - Z_min)
+            u = 0
+            v = int(round(np.clip((p * (HEIGHT - 1)), -1, HEIGHT + 1)))
+            u_p = WIDTH
+            v_p = v
+
+            cv2.line(
+                traj_plot, (u_p, v_p), (u, v), color, max(1, thickness // 4)
+            )
+
+    px = (0 - X_min) / (X_max - X_min)
+    py = (0 - Z_min) / (Z_max - Z_min)
+    u = int(round(np.clip((px * (WIDTH - 1)), -1, WIDTH + 1)))
+    v = int(round(np.clip((py * (HEIGHT - 1)), -1, HEIGHT + 1)))
+    cv2.circle(traj_plot, (u, v), thickness * 3, color, -1)
 
     traj_plot = cast(np.ndarray, cv2.flip(traj_plot, 0))
     return traj_plot
@@ -830,6 +1002,8 @@ def plot_trajectories_image(
     method: str = "add_weighted",
     track: bool = False,
     line: bool = False,
+    draw_grid: bool = False,
+    grid_range_img: Tuple[int, int] = (1, 5),
     track_width: float = 1.5,
     interpolation_samples: int = 0,
     thickness: int = 2,
@@ -848,6 +1022,8 @@ def plot_trajectories_image(
             method=method,
             track=track,
             line=line,
+            draw_grid=draw_grid,
+            grid_range_img=grid_range_img,
             track_width=track_width,
             interpolation_samples=interpolation_samples,
             thickness=thickness,
@@ -862,6 +1038,7 @@ def plot_trajectories_bev(
     thickness: int = 2,
     grid_range: float = 20,  # meters
     line: bool = False,
+    draw_grid_bev: bool = False,
 ) -> np.ndarray:
     assert len(trajectories) == len(
         colors
@@ -878,6 +1055,7 @@ def plot_trajectories_bev(
             thickness=thickness,
             grid_range=grid_range,
             line=line,
+            draw_grid_bev=draw_grid_bev,
             traj_plot=bev_img,
         )
 
@@ -893,11 +1071,14 @@ def plot_trajectories(
     method: str = "add_weighted",
     track: bool = False,
     line: bool = False,
+    draw_grid: bool = False,
+    draw_grid_bev: bool = False,
     track_width: float = 1.5,
     interpolation_samples: int = 0,
     thickness: int = 2,
     thickness_bev: int = 2,
     grid_range: float = 20,
+    grid_range_img: Tuple[int, int] = (1, 5),
 ) -> Tuple[np.ndarray, np.ndarray]:
     image_trajectory = plot_trajectories_image(
         frame_img,
@@ -908,9 +1089,11 @@ def plot_trajectories(
         method=method,
         track=track,
         line=line,
+        draw_grid=draw_grid,
         track_width=track_width,
         interpolation_samples=interpolation_samples,
         thickness=thickness,
+        grid_range_img=grid_range_img,
     )
 
     bev_trajectory = plot_trajectories_bev(
@@ -920,6 +1103,44 @@ def plot_trajectories(
         thickness=thickness_bev,
         grid_range=grid_range,
         line=line,
+        draw_grid_bev=draw_grid_bev,
     )
 
     return image_trajectory, bev_trajectory
+
+
+# Semantics plotting
+
+def overlay_image_by_semantics(
+    image_base: np.ndarray,
+    image_overlay: np.ndarray,
+    semantics_img: np.ndarray,
+    semantics_colors: List[Tuple[int, int, int]],
+) -> np.ndarray:
+    mask = np.zeros_like(
+        image_base[:, :, 0],
+        dtype=bool,
+    )
+
+    # Setting the mask based on the semantics_img
+    for idx, color in enumerate(semantics_colors):
+        # Create a mask for each semantic label's corresponding color
+        print('semantics_img', semantics_img.shape)
+        print('idx', idx)
+        print('color', color)
+        color_mask = (semantics_img == color)
+        print('color_mask', color_mask.shape)
+        
+        # Convert this boolean mask to a 2D mask by checking all channels
+        single_channel_color_mask = np.all(color_mask, axis=-1)
+        print('single_channel_color_mask', single_channel_color_mask.shape)
+
+        # Add this mask to the general mask
+        mask[single_channel_color_mask] = True
+    
+    cv2.imwrite('assets/semantics_img.png', semantics_img)
+    cv2.imwrite('assets/semantics_img_mask.png', (mask * 255).astype(np.uint8))
+    # Apply the mask to image_overlay to image_base
+    image_base[~mask] = image_overlay[~mask]
+
+    return image_base

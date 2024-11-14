@@ -214,7 +214,7 @@ class SemDepthPerception:
         disparity_np = depth_prediction.cpu().numpy()
         print('disparity_np', disparity_np.min(), disparity_np.max())
 
-        max_disparity = 30.0
+        max_disparity = 100.0
         min_disparity = 0.001
         disparity_np[disparity_np > max_disparity] = -1
         disparity_np[disparity_np <= min_disparity] = -1
